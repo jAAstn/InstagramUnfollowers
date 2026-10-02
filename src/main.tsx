@@ -38,8 +38,9 @@ import { Searching } from "./components/Searching";
 import { Toolbar } from "./components/Toolbar";
 import { Unfollowing } from "./components/Unfollowing";
 import { Timings } from "./model/timings";
-import { loadCachedScanResults, loadTimings, loadWhitelist, saveCachedScanResults, saveTimings, saveWhitelist } from "./utils/whitelist-manager";
-import { getInitialLanguage, Language, saveLanguage, t } from "./utils/i18n";
+import { FeatureSettings, LastPostInfo } from "./model/last-post";
+import { loadCachedScanResults, loadFeatureSettings, loadTimings, loadWhitelist, saveCachedScanResults, saveFeatureSettings, saveTimings, saveWhitelist } from "./utils/whitelist-manager";
+import { enqueueLastPost, getCachedLastPostInfos, setLastPostGate } from "./utils/last-post-queue";
 
 const LOCAL_PREVIEW_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 const isLocalPreview = LOCAL_PREVIEW_HOSTS.has(location.hostname);
@@ -149,11 +150,28 @@ function App() {
     loadCachedScanResults(),
   );
 
+  const [featureSettings, setFeatureSettings] = useState<FeatureSettings>(() => loadFeatureSettings());
+  useEffect(() => saveFeatureSettings(featureSettings), [featureSettings]);
+
+  // Per-account last-post info, kept outside `state` so `results` stays readonly.
+  // Seeded from the localStorage cache so already-known accounts render instantly.
+  const [lastPostInfos, setLastPostInfos] = useState<Record<string, LastPostInfo>>(() => getCachedLastPostInfos());
+
   const [lang, setLang] = useState<Language>(() => getInitialLanguage());
 
   const handleLanguageChange = (newLang: Language) => {
     setLang(newLang);
     saveLanguage(newLang);
+  };
+
+  const lastPostFetchAllowed = (state.status === "scanning" && state.percentage === 100) || scanningPaused;
+  useEffect(() => setLastPostGate(() => (state.status === "scanning" && state.percentage === 100) || scanningPaused), [state]);
+
+  const requestLastPost = (user: UserNode) => {
+    if (featureSettings.lastPostBadgeEnabled && lastPostFetchAllowed && lastPostInfos[user.id]?.status !== "loaded") {
+      enqueueLastPost(user.id, user.is_private, info => setLastPostInfos(prev => ({ ...prev, [user.id]: info })));
+    }
+  };
   };
 
 
@@ -773,7 +791,14 @@ function App() {
         scanningPaused={scanningPaused}
         UserCheckIcon={UserCheckIcon}
         UserUncheckIcon={UserUncheckIcon}
+        scanningPaused={scanningPaused}
+        UserCheckIcon={UserCheckIcon}
+        UserUncheckIcon={UserUncheckIcon}
         lang={lang}
+        featureSettings={featureSettings}
+        lastPostInfos={lastPostInfos}
+        lastPostFetchAllowed={lastPostFetchAllowed}
+        requestLastPost={requestLastPost}
       ></Searching>;
       break;
     }
@@ -803,6 +828,8 @@ function App() {
           toggleCurrentePageUsers={toggleCurrentePageUsers}
           setTimings={setTimings}
           currentTimings={timings}
+          featureSettings={featureSettings}
+          setFeatureSettings={setFeatureSettings}
           whitelistedUsers={state.status === "scanning" ? state.whitelistedResults : loadWhitelist()}
           onWhitelistUpdate={onWhitelistUpdate}
           lang={lang}
