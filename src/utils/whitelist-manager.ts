@@ -1,7 +1,6 @@
 import { UserNode } from "../model/user";
 import { Timings } from "../model/timings";
-import { DEFAULT_FEATURE_SETTINGS, FeatureSettings } from "../model/last-post";
-import { WHITELISTED_RESULTS_STORAGE_KEY, TIMINGS_STORAGE_KEY, LAST_SCAN_RESULTS_STORAGE_KEY, LAST_SCAN_TIMESTAMP_STORAGE_KEY, FEATURE_SETTINGS_STORAGE_KEY } from "../constants/constants";
+import { WHITELISTED_RESULTS_STORAGE_KEY, TIMINGS_STORAGE_KEY, LAST_SCAN_RESULTS_STORAGE_KEY, LAST_SCAN_TIMESTAMP_STORAGE_KEY } from "../constants/constants";
 
 /**
  * Export whitelist to a JSON file
@@ -88,15 +87,27 @@ export const clearWhitelist = (): void => {
  * Load whitelist from localStorage
  */
 export const loadWhitelist = (): readonly UserNode[] => {
-  const whitelistedResultsFromStorage = localStorage.getItem(WHITELISTED_RESULTS_STORAGE_KEY);
-  return whitelistedResultsFromStorage === null ? [] : JSON.parse(whitelistedResultsFromStorage);
+  try {
+    const whitelistedResultsFromStorage = localStorage.getItem(WHITELISTED_RESULTS_STORAGE_KEY);
+    if (!whitelistedResultsFromStorage) {
+      return [];
+    }
+    const parsed = JSON.parse(whitelistedResultsFromStorage);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 };
 
 /**
  * Save whitelist to localStorage
  */
 export const saveWhitelist = (whitelistedUsers: readonly UserNode[]): void => {
-  localStorage.setItem(WHITELISTED_RESULTS_STORAGE_KEY, JSON.stringify(whitelistedUsers));
+  try {
+    localStorage.setItem(WHITELISTED_RESULTS_STORAGE_KEY, JSON.stringify(whitelistedUsers));
+  } catch (e) {
+    console.warn("Could not save whitelist to storage:", e);
+  }
 };
 
 /**
@@ -141,7 +152,11 @@ export const loadTimings = (): Timings | null => {
  * Save timings to localStorage
  */
 export const saveTimings = (timings: Timings): void => {
-  localStorage.setItem(TIMINGS_STORAGE_KEY, JSON.stringify(timings));
+  try {
+    localStorage.setItem(TIMINGS_STORAGE_KEY, JSON.stringify(timings));
+  } catch (e) {
+    console.warn("Could not save timings to storage:", e);
+  }
 };
 
 /**
@@ -178,19 +193,3 @@ export const loadCachedScanResults = (): { results: readonly UserNode[]; timesta
     return null;
   }
 };
-
-/** Load feature settings, merged over defaults so new keys always have a value. */
-export const loadFeatureSettings = (): FeatureSettings => {
-  try {
-    const raw = localStorage.getItem(FEATURE_SETTINGS_STORAGE_KEY);
-    const parsed: unknown = raw === null ? null : JSON.parse(raw);
-    return typeof parsed === "object" && parsed !== null
-      ? { ...DEFAULT_FEATURE_SETTINGS, ...(parsed as Partial<FeatureSettings>) }
-      : DEFAULT_FEATURE_SETTINGS;
-  } catch {
-    return DEFAULT_FEATURE_SETTINGS;
-  }
-};
-
-export const saveFeatureSettings = (settings: FeatureSettings): void =>
-  localStorage.setItem(FEATURE_SETTINGS_STORAGE_KEY, JSON.stringify(settings));

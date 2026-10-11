@@ -1,10 +1,9 @@
 import { UserNode } from "../model/user";
-import { DEFAULT_USERS_PER_SEARCH_CYCLE, IG_APP_ID, INSTAGRAM_ASBD_ID, INSTAGRAM_WEB_APP_ID, UNFOLLOWERS_PER_PAGE, WITHOUT_PROFILE_PICTURE_URL_IDS } from "../constants/constants";
+import { DEFAULT_USERS_PER_SEARCH_CYCLE, INSTAGRAM_ASBD_ID, INSTAGRAM_WEB_APP_ID, UNFOLLOWERS_PER_PAGE, WITHOUT_PROFILE_PICTURE_URL_IDS } from "../constants/constants";
 import { ScanningTab } from "../model/scanning-tab";
 import { ScanningFilter } from "../model/scanning-filter";
 import { UnfollowLogEntry } from "../model/unfollow-log-entry";
 import { UnfollowFilter } from "../model/unfollow-filter";
-import { LastPostInfo } from "../model/last-post";
 
 export async function copyListToClipboard(nonFollowersList: readonly UserNode[], alertMessage: string = 'List copied to clipboard!'): Promise<void> {
   const sortedList = [...nonFollowersList].sort((a, b) => (a.username > b.username ? 1 : -1));
@@ -59,10 +58,14 @@ export function getMaxPage(nonFollowersList: readonly UserNode[]): number {
 
 export function getCurrentPageUnfollowers(nonFollowersList: readonly UserNode[], currentPage: number): readonly UserNode[] {
   const sortedList = [...nonFollowersList].sort((a, b) => (a.username > b.username ? 1 : -1));
-  return sortedList.splice(UNFOLLOWERS_PER_PAGE * (currentPage - 1), UNFOLLOWERS_PER_PAGE);
+  const startIndex = UNFOLLOWERS_PER_PAGE * (currentPage - 1);
+  return sortedList.slice(startIndex, startIndex + UNFOLLOWERS_PER_PAGE);
 }
 
 export function isWithoutProfilePicture(user: UserNode): boolean {
+  if (!user.profile_pic_url) {
+    return true;
+  }
   return WITHOUT_PROFILE_PICTURE_URL_IDS.some(id => user.profile_pic_url.includes(id));
 }
 
@@ -96,10 +99,9 @@ export function getUsersForDisplay(
     if (!filter.showVerified && result.is_verified) {
       continue;
     }
-    if (!filter.showFollowers && result.follows_viewer) {
-      continue;
-    }
-    if (!filter.showNonFollowers && !result.follows_viewer) {
+    // Scans only keep accounts that don't follow back; this also hides
+    // mutuals stored by older cached scans.
+    if (result.follows_viewer) {
       continue;
     }
     if (!filter.showWithOutProfilePicture && isWithoutProfilePicture(result)) {
@@ -196,9 +198,11 @@ export interface FriendshipsPage {
   readonly has_more?: boolean;
 }
 
-export function friendshipsUrlGenerator(kind: FriendshipsListKind, maxId?: string, count: number = DEFAULT_USERS_PER_SEARCH_CYCLE): string {
-  const viewerId = getCookie('ds_user_id');
-  const base = `https://www.instagram.com/api/v1/friendships/${viewerId}/${kind}/?count=${count}`;
+// `userId` defaults to the logged-in viewer; pass another account's id to read
+// that account's following/followers list instead.
+export function friendshipsUrlGenerator(kind: FriendshipsListKind, maxId?: string, count: number = DEFAULT_USERS_PER_SEARCH_CYCLE, userId?: string): string {
+  const targetId = userId ?? getCookie('ds_user_id');
+  const base = `https://www.instagram.com/api/v1/friendships/${targetId}/${kind}/?count=${count}`;
   return maxId === undefined ? base : `${base}&max_id=${encodeURIComponent(maxId)}`;
 }
 
@@ -212,7 +216,7 @@ export class InstagramApiError extends Error {
   }
 }
 
-export async function fetchFriendshipsPage(kind: FriendshipsListKind, maxId?: string, count?: number): Promise<FriendshipsPage> {
+export async function fetchFriendshipsPage(kind: FriendshipsListKind, maxId?: string, count?: number, userId?: string): Promise<FriendshipsPage> {
   const csrftoken = getCookie('csrftoken') || '';
   const headers: Record<string, string> = {
     'X-IG-App-ID': INSTAGRAM_WEB_APP_ID,
@@ -224,7 +228,7 @@ export async function fetchFriendshipsPage(kind: FriendshipsListKind, maxId?: st
     headers['X-CSRFToken'] = csrftoken;
   }
 
-  const response = await fetch(friendshipsUrlGenerator(kind, maxId, count), {
+  const response = await fetch(friendshipsUrlGenerator(kind, maxId, count, userId), {
     credentials: 'same-origin',
     headers,
   });
@@ -255,53 +259,72 @@ export function rawFriendshipUserToUserNode(raw: RawFriendshipUser, followsViewe
   };
 }
 
-export function userFeedUrlGenerator(userId: string): string {
-  // web_profile_info no longer returns post nodes (only a count), so use the
-  // user feed endpoint, which returns real items with timestamps. count=3 lets
-  // us take the newest even if a pinned (older) post sorts first.
-  return `https://www.instagram.com/api/v1/feed/user/${userId}/?count=3`;
+export interface FollowerIndex {
+  readonly ids: ReadonlySet<string>;
+  readonly usernames: ReadonlySet<string>;
 }
 
-/** Compact relative age of a post timestamp (seconds), e.g. "3d ago", "8mo ago". */
-export function formatPostAge(timestampSeconds: number): string {
-  const days = Math.floor((Date.now() - timestampSeconds * 1000) / 86_400_000);
-  if (days < 1) return "today";
-  if (days < 7) return `${days}d ago`;
-  if (days < 30) return `${Math.floor(days / 7)}w ago`;
-  if (days < 365) return `${Math.floor(days / 30)}mo ago`;
-  return `${Math.floor(days / 365)}y ago`;
+export function createFollowerIndex(): {
+  readonly ids: Set<string>;
+  readonly usernames: Set<string>;
+} {
+  return {
+    ids: new Set<string>(),
+    usernames: new Set<string>(),
+  };
 }
 
-interface FeedItem { readonly taken_at: number; readonly code: string }
-
-/**
- * Fetch newest-post info from the user feed endpoint. Picks the max timestamp
- * across the few returned items (so a pinned-old post can't win), flags
- * private / no-posts on an empty feed, and never throws (failures → `error`).
- */
-export async function fetchLastPostInfo(userId: string, isPrivate: boolean): Promise<LastPostInfo> {
-  try {
-    const res = await fetch(userFeedUrlGenerator(userId), {
-      headers: { "x-ig-app-id": IG_APP_ID },
-      credentials: "include",
-    });
-    const json = await res.json();
-    const items: FeedItem[] = json?.items ?? [];
-    if (items.length === 0) {
-      // Empty feed: private (no access) or genuinely no posts. Log only anomalous
-      // (non-ok) payloads so expected empties don't spam the console (GS26).
-      if (json?.status !== "ok") {
-        console.warn("lastpost.fetch.shape", userId, res.status, json?.status, JSON.stringify(json)?.slice(0, 200));
-      }
-      return { status: "loaded", ageText: isPrivate ? "private" : "no posts", shortcode: null };
+export function extractUserIdentities(user: RawFriendshipUser): {
+  readonly ids: readonly string[];
+  readonly username: string;
+} {
+  const ids: string[] = [];
+  if (user.pk !== undefined && user.pk !== null) {
+    const s = String(user.pk).trim();
+    if (s) {
+      ids.push(s);
     }
-    const latest = items.reduce((a, b) => (b.taken_at > a.taken_at ? b : a));
-    // Some items expose a long internal code instead of the URL shortcode; only
-    // link when it actually looks like a shortcode, else show the age alone.
-    const shortcode = /^[A-Za-z0-9_-]{8,15}$/.test(latest.code) ? latest.code : null;
-    return { status: "loaded", ageText: formatPostAge(latest.taken_at), shortcode };
-  } catch (e) {
-    console.error("lastpost.fetch", userId, e);
-    return { status: "error", ageText: null, shortcode: null };
+  }
+  if (user.pk_id) {
+    const s = String(user.pk_id).trim();
+    if (s && !ids.includes(s)) {
+      ids.push(s);
+    }
+  }
+  if ((user as any).id) {
+    const s = String((user as any).id).trim();
+    if (s && !ids.includes(s)) {
+      ids.push(s);
+    }
+  }
+  const username = (user.username ?? "").trim().toLowerCase();
+  return { ids, username };
+}
+
+export function addFollowerToIndex(
+  index: { readonly ids: Set<string>; readonly usernames: Set<string> },
+  user: RawFriendshipUser,
+): void {
+  const { ids, username } = extractUserIdentities(user);
+  for (const id of ids) {
+    index.ids.add(id);
+  }
+  if (username) {
+    index.usernames.add(username);
   }
 }
+
+export function isUserInFollowerIndex(
+  index: { readonly ids: ReadonlySet<string>; readonly usernames: ReadonlySet<string> },
+  user: RawFriendshipUser,
+): boolean {
+  const { ids, username } = extractUserIdentities(user);
+  if (ids.some(id => index.ids.has(id))) {
+    return true;
+  }
+  if (username && index.usernames.has(username)) {
+    return true;
+  }
+  return false;
+}
+

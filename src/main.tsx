@@ -14,19 +14,24 @@ import {
   DEFAULT_USERS_PER_SEARCH_CYCLE,
   FOLLOWERS_PAGE_SAFETY_LIMIT,
   FOLLOWING_PAGE_SAFETY_LIMIT,
+  CHECKS_BEFORE_LONG_SLEEP,
   INSTAGRAM_ASBD_ID,
   INSTAGRAM_HOSTNAME,
   INSTAGRAM_WEB_APP_ID,
   RATE_LIMIT_COOLDOWN_SECONDS,
 } from "./constants/constants";
 import {
+  addFollowerToIndex,
   assertUnreachable,
+  createFollowerIndex,
   fetchFriendshipsPage,
   FriendshipsListKind,
+  FriendshipsPage,
   getCookie,
   getCurrentPageUnfollowers,
   getUsersForDisplay,
   InstagramApiError,
+  isUserInFollowerIndex,
   RawFriendshipUser,
   rawFriendshipUserToUserNode,
   sleep,
@@ -38,9 +43,8 @@ import { Searching } from "./components/Searching";
 import { Toolbar } from "./components/Toolbar";
 import { Unfollowing } from "./components/Unfollowing";
 import { Timings } from "./model/timings";
-import { FeatureSettings, LastPostInfo } from "./model/last-post";
-import { loadCachedScanResults, loadFeatureSettings, loadTimings, loadWhitelist, saveCachedScanResults, saveFeatureSettings, saveTimings, saveWhitelist } from "./utils/whitelist-manager";
-import { enqueueLastPost, getCachedLastPostInfos, setLastPostGate } from "./utils/last-post-queue";
+import { loadCachedScanResults, loadTimings, loadWhitelist, saveCachedScanResults, saveTimings, saveWhitelist } from "./utils/whitelist-manager";
+import { getInitialLanguage, Language, saveLanguage, t } from "./utils/i18n";
 
 const LOCAL_PREVIEW_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 const isLocalPreview = LOCAL_PREVIEW_HOSTS.has(location.hostname);
@@ -93,12 +97,6 @@ const _getPreviewUsers = (): readonly UserNode[] => [
   _createPreviewUser("12", "lowlight.club", "Owen Voss", { isPrivate: true }),
 ];
 
-// pause
-let scanningPaused = false;
-
-function pauseScan() {
-  scanningPaused = !scanningPaused;
-}
 
 
 function App() {
@@ -115,8 +113,6 @@ function App() {
           selectedResults: _getPreviewUsers().slice(0, 3),
           whitelistedResults: _getPreviewUsers().slice(10, 12),
           filter: {
-            showNonFollowers: true,
-            showFollowers: false,
             showVerified: true,
             showPrivate: true,
             showWithOutProfilePicture: true,
@@ -150,28 +146,22 @@ function App() {
     loadCachedScanResults(),
   );
 
-  const [featureSettings, setFeatureSettings] = useState<FeatureSettings>(() => loadFeatureSettings());
-  useEffect(() => saveFeatureSettings(featureSettings), [featureSettings]);
-
-  // Per-account last-post info, kept outside `state` so `results` stays readonly.
-  // Seeded from the localStorage cache so already-known accounts render instantly.
-  const [lastPostInfos, setLastPostInfos] = useState<Record<string, LastPostInfo>>(() => getCachedLastPostInfos());
-
   const [lang, setLang] = useState<Language>(() => getInitialLanguage());
+
+  const [scanningPaused, setScanningPaused] = useState(false);
+  const scanningPausedRef = React.useRef(false);
+
+  const pauseScan = () => {
+    setScanningPaused(prev => {
+      const next = !prev;
+      scanningPausedRef.current = next;
+      return next;
+    });
+  };
 
   const handleLanguageChange = (newLang: Language) => {
     setLang(newLang);
     saveLanguage(newLang);
-  };
-
-  const lastPostFetchAllowed = (state.status === "scanning" && state.percentage === 100) || scanningPaused;
-  useEffect(() => setLastPostGate(() => (state.status === "scanning" && state.percentage === 100) || scanningPaused), [state]);
-
-  const requestLastPost = (user: UserNode) => {
-    if (featureSettings.lastPostBadgeEnabled && lastPostFetchAllowed && lastPostInfos[user.id]?.status !== "loaded") {
-      enqueueLastPost(user.id, user.is_private, info => setLastPostInfos(prev => ({ ...prev, [user.id]: info })));
-    }
-  };
   };
 
 
@@ -206,8 +196,6 @@ function App() {
       selectedResults: [],
       whitelistedResults,
       filter: {
-        showNonFollowers: true,
-        showFollowers: false,
         showVerified: true,
         showPrivate: true,
         showWithOutProfilePicture: true,
@@ -236,8 +224,6 @@ function App() {
         selectedResults: previewUsers.slice(0, 3),
         whitelistedResults: previewUsers.slice(10, 12),
         filter: {
-          showNonFollowers: true,
-          showFollowers: false,
           showVerified: true,
           showPrivate: true,
           showWithOutProfilePicture: true,
@@ -257,8 +243,6 @@ function App() {
       selectedResults: [],
       whitelistedResults,
       filter: {
-        showNonFollowers: true,
-        showFollowers: false,
         showVerified: true,
         showPrivate: true,
         showWithOutProfilePicture: true,
@@ -416,140 +400,123 @@ function App() {
   }, [isActiveProcess, state]);
 
   useEffect(() => {
-    // Instagram's private following/followers endpoints (see
-    // utils/utils.ts) don't expose a reliable total count up front the way
-    // the old GraphQL endpoint did, so we can't compute an exact
-    // percentage. This gives a smooth, ever-increasing estimate within a
-    // phase's share of the progress bar without ever overselling 100%
-    // before the phase is actually done.
-    const estimatePhaseProgress = (usersFetchedSoFar: number): number =>
-      100 * (1 - 1 / (1 + usersFetchedSoFar / 150));
+    // Fetches one page, retrying with backoff on rate limits / network errors.
+    // `blocked` is true when retries were exhausted for such a transient error
+    // (the scan should stop); false means a different, non-retryable error
+    // (e.g. 404 / unavailable account), which callers may choose to skip.
+    type PageResult =
+      | { readonly ok: true; readonly page: FriendshipsPage }
+      | { readonly ok: false; readonly blocked: boolean };
 
-    // Fetches every page of `kind` (following or followers), applying the
-    // same pacing/pause/backoff behavior the original single-endpoint scan
-    // used, and reports progress within [progressRangeStart, progressRangeEnd]
-    // of the overall percentage bar.
+    const fetchPageWithRetry = async (
+      kind: FriendshipsListKind,
+      maxId?: string,
+      count?: number,
+      userId?: string,
+    ): Promise<PageResult> => {
+      let retries = 0;
+      const maxRetries = 3;
+      // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
+      while (true) {
+        try {
+          return { ok: true, page: await fetchFriendshipsPage(kind, maxId, count, userId) };
+        } catch (e: any) {
+          const status = e?.status;
+          const message = String(e?.message ?? "");
+          const isRateLimitOrSoftBlock =
+            (e instanceof InstagramApiError || e?.name === "InstagramApiError") &&
+            (status === 429 || /feedback_required|checkpoint|rate limit|please wait/i.test(message));
+          const isNetworkError = e instanceof TypeError || /fetch|network/i.test(message);
+          const isTransient = isRateLimitOrSoftBlock || isNetworkError;
+
+          if (isTransient && retries < maxRetries) {
+            retries++;
+            const waitSeconds = isRateLimitOrSoftBlock
+              ? RATE_LIMIT_COOLDOWN_SECONDS * retries
+              : 5 * retries;
+            for (let sec = waitSeconds; sec > 0; sec--) {
+              setToast({
+                show: true,
+                text: t(lang, "rateLimitPause", sec),
+              });
+              await sleep(1000);
+            }
+            setToast({ show: false });
+            continue;
+          }
+          console.error(`${kind} request failed${userId ? ` for ${userId}` : ""}:`, e);
+          return { ok: false, blocked: isTransient };
+        }
+      }
+    };
+
+    let requestsSinceLongSleep = 0;
+    const paceRequest = async () => {
+      // Pause scanning if user requested so.
+      while (scanningPausedRef.current) {
+        await sleep(1000);
+        console.info("Scan paused");
+      }
+
+      await sleep(Math.floor(Math.random() * 700) + 300);
+      await sleep(Math.floor(Math.random() * (timings.timeBetweenSearchCycles - timings.timeBetweenSearchCycles * 0.7)) + timings.timeBetweenSearchCycles);
+
+      requestsSinceLongSleep++;
+      if (requestsSinceLongSleep >= CHECKS_BEFORE_LONG_SLEEP) {
+        requestsSinceLongSleep = 0;
+        const longSleepVar = Math.max(
+          0,
+          timings.timeToWaitAfterFiveSearchCycles + (Math.random() * 10000 - 5000), // +/- 5 seconds
+        );
+        setToast({
+          show: true,
+          text: t(lang, "sleepingSafety", Math.round(longSleepVar / 1000)),
+        });
+        await sleep(longSleepVar);
+      }
+      setToast({ show: false });
+    };
+
+    // Walks the viewer's own list (followers or following) page by page. `onPageUsers` is
+    // awaited for each page before the next one is requested and returns
+    // false to stop the walk early. Resolves true only if the whole list was
+    // walked.
     const fetchList = async (
       kind: FriendshipsListKind,
       pageSafetyLimit: number,
-      progressRangeStart: number,
-      progressRangeEnd: number,
-      onPageUsers: (pageUsers: readonly RawFriendshipUser[]) => void,
+      onPageUsers: (pageUsers: readonly RawFriendshipUser[]) => Promise<boolean>,
     ): Promise<boolean> => {
       let maxId: string | undefined;
       let pagesFetched = 0;
-      let scrollCycle = 0;
-      let totalUsersFetched = 0;
 
       // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
       while (true) {
-        let page;
-        let retries = 0;
-        const maxRetries = 3;
-        while (retries <= maxRetries) {
-          try {
-            page = await fetchFriendshipsPage(kind, maxId, timings.usersPerSearchCycle);
-            break;
-          } catch (e: any) {
-            const status = e?.status;
-            const message = String(e?.message ?? "");
-            const isRateLimitOrSoftBlock =
-              (e instanceof InstagramApiError || e?.name === "InstagramApiError") &&
-              (status === 429 || status === 400 || /feedback_required|checkpoint|rate limit|please wait/i.test(message));
-            const isNetworkError = e instanceof TypeError || /fetch|network/i.test(message);
-
-            if ((isRateLimitOrSoftBlock || isNetworkError) && retries < maxRetries) {
-              retries++;
-              const waitSeconds = isRateLimitOrSoftBlock
-                ? RATE_LIMIT_COOLDOWN_SECONDS * retries
-                : 5 * retries;
-              for (let sec = waitSeconds; sec > 0; sec--) {
-                setToast({
-                  show: true,
-                  text: t(lang, "rateLimitPause", sec),
-                });
-                await sleep(1000);
-              }
-              setToast({ show: false });
-              continue;
-            }
-            console.error(`Stopping ${kind} scan early:`, e);
-            return false;
-          }
+        const result = await fetchPageWithRetry(kind, maxId, timings.usersPerSearchCycle);
+        if (!result.ok) {
+          console.error(`Stopping ${kind} scan early.`);
+          return false;
         }
+        const page = result.page;
+        const pageUsers = page.users ?? [];
 
-        if (!page) {
+        if (!(await onPageUsers(pageUsers))) {
           return false;
         }
 
-        const pageUsers = page.users ?? [];
-        totalUsersFetched += pageUsers.length;
-        onPageUsers(pageUsers);
-
-        setState(prevState => {
-          if (prevState.status !== "scanning") {
-            return prevState;
-          }
-          const rangeSize = progressRangeEnd - progressRangeStart;
-          return {
-            ...prevState,
-            percentage: Math.round(progressRangeStart + estimatePhaseProgress(totalUsersFetched) * (rangeSize / 100)),
-          };
-        });
-
         const hasMore = Boolean(page.next_max_id) && page.has_more !== false;
         if (!hasMore || pageUsers.length === 0) {
-          break;
+          return true;
         }
 
         pagesFetched += 1;
         if (pagesFetched >= pageSafetyLimit) {
-          console.error(`Stopping ${kind} scan early: hit the safety cap of ${pageSafetyLimit} pages with ${totalUsersFetched} users fetched.`);
+          console.error(`Stopping ${kind} scan early: hit the safety cap of ${pageSafetyLimit} pages.`);
           return false;
         }
         maxId = page.next_max_id;
 
-        // Pause scanning if user requested so.
-        while (scanningPaused) {
-          await sleep(1000);
-          console.info("Scan paused");
-        }
-
-        // Human-like behavior: Micro-pause between fetching chunks
-        const microPause = Math.floor(Math.random() * 1500) + 500; // 500ms - 2000ms
-        await sleep(microPause);
-
-        // Standard delay between cycles
-        await sleep(Math.floor(Math.random() * (timings.timeBetweenSearchCycles - timings.timeBetweenSearchCycles * 0.7)) + timings.timeBetweenSearchCycles);
-
-        scrollCycle++;
-        if (scrollCycle > 6) {
-          scrollCycle = 0;
-          // Variable long sleep to avoid patterns
-          const longSleepVar = Math.max(
-            0,
-            timings.timeToWaitAfterFiveSearchCycles + (Math.random() * 10000 - 5000), // +/- 5 seconds
-          );
-          setToast({
-            show: true,
-            text: t(lang, "sleepingSafety", Math.round(longSleepVar / 1000)),
-          });
-          await sleep(longSleepVar);
-        }
-        setToast({ show: false });
+        await paceRequest();
       }
-
-      setState(prevState => {
-        if (prevState.status !== "scanning") {
-          return prevState;
-        }
-        return {
-          ...prevState,
-          percentage: progressRangeEnd,
-        };
-      });
-
-      return true;
     };
 
     const scan = async () => {
@@ -560,31 +527,120 @@ function App() {
         return;
       }
 
-      // 1. Fetch all accounts you follow.
-      // We push directly into followingUsers to avoid allocating new arrays on every page.
-      const followingUsers: RawFriendshipUser[] = [];
+      const viewerId = getCookie("ds_user_id");
+      if (viewerId === null) {
+        setState(prevState =>
+          prevState.status === "scanning" ? { ...prevState, isScanningActive: false } : prevState,
+        );
+        setToast({ show: true, text: t(lang, "scanFailedFollowing") });
+        return;
+      }
+
+      // Phase 1: Retrieve and index all of the viewer's followers.
+      // We dual-index by ID and normalized lowercase username to guarantee zero false positives.
+      const followerIndex = createFollowerIndex();
+      let followersCount = 0;
+
+      const indexFollowersPage = async (pageUsers: readonly RawFriendshipUser[]): Promise<boolean> => {
+        for (const user of pageUsers) {
+          addFollowerToIndex(followerIndex, user);
+          followersCount++;
+        }
+
+        const followersProgress = Math.min(49, Math.round(50 * (1 - 1 / (1 + followersCount / 150))));
+        setState(prevState =>
+          prevState.status === "scanning"
+            ? {
+                ...prevState,
+                percentage: followersProgress,
+                totalScanned: followersCount,
+              }
+            : prevState,
+        );
+
+        setToast({
+          show: true,
+          text: t(lang, "indexingFollowersProgress", followersCount),
+        });
+
+        return true;
+      };
+
+      const followersCompleted = await fetchList(
+        "followers",
+        FOLLOWERS_PAGE_SAFETY_LIMIT,
+        indexFollowersPage,
+      );
+
+      if (!followersCompleted) {
+        // If followers list could not be fully loaded, aborting is mandatory.
+        // Proceeding with an incomplete follower index would cause true followers
+        // to be falsely flagged as unfollowers.
+        setState(prevState =>
+          prevState.status === "scanning"
+            ? { ...prevState, isScanningActive: false, scanIncomplete: true }
+            : prevState,
+        );
+        setToast({
+          show: true,
+          text: t(lang, "scanFailedFollowers"),
+        });
+        return;
+      }
+
+      // Mark Phase 1 complete at 50%
+      setState(prevState =>
+        prevState.status === "scanning"
+          ? { ...prevState, percentage: 50 }
+          : prevState,
+      );
+
+      // Phase 2: Walk the viewer's following list and check each against the follower index.
+      // Accounts not in the index genuinely do not follow back and are progressively streamed to UI.
+      const nonFollowers: UserNode[] = [];
+      let checkedCount = 0;
+
+      const checkFollowingPage = async (pageUsers: readonly RawFriendshipUser[]): Promise<boolean> => {
+        const newNonFollowersBatch: UserNode[] = [];
+
+        for (const user of pageUsers) {
+          const followsViewer = isUserInFollowerIndex(followerIndex, user);
+          if (!followsViewer) {
+            const node = rawFriendshipUserToUserNode(user, false);
+            nonFollowers.push(node);
+            newNonFollowersBatch.push(node);
+          }
+          checkedCount++;
+        }
+
+        const followingProgress = Math.min(99, 50 + Math.round(50 * (1 - 1 / (1 + checkedCount / 150))));
+
+        setState(prevState =>
+          prevState.status === "scanning"
+            ? {
+                ...prevState,
+                results: newNonFollowersBatch.length > 0 ? [...prevState.results, ...newNonFollowersBatch] : prevState.results,
+                totalScanned: checkedCount,
+                percentage: followingProgress,
+              }
+            : prevState,
+        );
+
+        setToast({
+          show: true,
+          text: t(lang, "scanningFollowingProgress", checkedCount),
+        });
+
+        return true;
+      };
+
       const followingCompleted = await fetchList(
         "following",
         FOLLOWING_PAGE_SAFETY_LIMIT,
-        0,
-        45,
-        pageUsers => {
-          followingUsers.push(...pageUsers);
-          const newNodes = pageUsers.map(user => rawFriendshipUserToUserNode(user, false));
-          setState(prevState => {
-            if (prevState.status !== "scanning") {
-              return prevState;
-            }
-            return {
-              ...prevState,
-              results: [...prevState.results, ...newNodes],
-            };
-          });
-        },
+        checkFollowingPage,
       );
 
-      // If following failed completely on the first attempt, don't waste network requests on followers.
-      if (!followingCompleted && followingUsers.length === 0) {
+      if (!followingCompleted && checkedCount === 0) {
         setState(prevState =>
           prevState.status === "scanning" ? { ...prevState, isScanningActive: false } : prevState,
         );
@@ -595,47 +651,11 @@ function App() {
         return;
       }
 
-      // 2. Fetch follower IDs only.
-      // We only store IDs in a Set<string> and discard the rest of the follower objects
-      // immediately to minimize memory usage.
-      const followerIds = new Set<string>();
-      const followersCompleted = await fetchList(
-        "followers",
-        FOLLOWERS_PAGE_SAFETY_LIMIT,
-        45,
-        95,
-        pageUsers => {
-          const newFollowerIds = new Set<string>();
-          for (const user of pageUsers) {
-            const id = String(user.pk_id ?? user.pk);
-            followerIds.add(id);
-            newFollowerIds.add(id);
-          }
-          setState(prevState => {
-            if (prevState.status !== "scanning") {
-              return prevState;
-            }
-            return {
-              ...prevState,
-              results: prevState.results.map(node =>
-                newFollowerIds.has(node.id) && !node.follows_viewer
-                  ? { ...node, follows_viewer: true }
-                  : node,
-              ),
-            };
-          });
-        },
-      );
+      const scanIsComplete = followingCompleted;
 
-      const allCompleted = followingCompleted && followersCompleted;
-
-      const results: UserNode[] = followingUsers.map(user =>
-        rawFriendshipUserToUserNode(user, followerIds.has(String(user.pk_id ?? user.pk))),
-      );
-
-      if (allCompleted || results.length > 0) {
-        saveCachedScanResults(results);
-        setCachedScan({ results, timestamp: Date.now() });
+      if (scanIsComplete || nonFollowers.length > 0) {
+        saveCachedScanResults(nonFollowers);
+        setCachedScan({ results: nonFollowers, timestamp: Date.now() });
       }
 
       setState(prevState => {
@@ -645,24 +665,18 @@ function App() {
         return {
           ...prevState,
           percentage: 100,
-          scanIncomplete: !followersCompleted,
+          scanIncomplete: !scanIsComplete,
           isScanningActive: false,
-          results,
+          results: nonFollowers,
+          totalScanned: checkedCount,
         };
       });
 
-      let toastMessage = t(lang, "scanCompleted");
-      if (!followingCompleted && !followersCompleted) {
-        toastMessage = t(lang, "partialScanInterrupted", followingUsers.length);
-      } else if (!followersCompleted) {
-        toastMessage = t(lang, "partialScanWarning");
-      } else if (!followingCompleted) {
-        toastMessage = t(lang, "partialScanInterrupted", followingUsers.length);
-      }
-
       setToast({
         show: true,
-        text: toastMessage,
+        text: scanIsComplete
+          ? t(lang, "scanCompleted")
+          : t(lang, "partialScanInterrupted", checkedCount),
       });
     };
     scan();
@@ -791,14 +805,7 @@ function App() {
         scanningPaused={scanningPaused}
         UserCheckIcon={UserCheckIcon}
         UserUncheckIcon={UserUncheckIcon}
-        scanningPaused={scanningPaused}
-        UserCheckIcon={UserCheckIcon}
-        UserUncheckIcon={UserUncheckIcon}
         lang={lang}
-        featureSettings={featureSettings}
-        lastPostInfos={lastPostInfos}
-        lastPostFetchAllowed={lastPostFetchAllowed}
-        requestLastPost={requestLastPost}
       ></Searching>;
       break;
     }
@@ -828,8 +835,6 @@ function App() {
           toggleCurrentePageUsers={toggleCurrentePageUsers}
           setTimings={setTimings}
           currentTimings={timings}
-          featureSettings={featureSettings}
-          setFeatureSettings={setFeatureSettings}
           whitelistedUsers={state.status === "scanning" ? state.whitelistedResults : loadWhitelist()}
           onWhitelistUpdate={onWhitelistUpdate}
           lang={lang}
