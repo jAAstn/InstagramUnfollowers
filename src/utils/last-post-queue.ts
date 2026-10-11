@@ -1,14 +1,15 @@
-import { LastPostInfo } from "../model/last-post";
+import type { LastPostInfo } from "../model/last-post";
+import { sleep } from "./utils";
 import { LAST_POST_CACHE_STORAGE_KEY, LAST_POST_MAX_DELAY, LAST_POST_MIN_DELAY } from "../constants/constants";
-import { fetchLastPostInfo, sleep } from "./utils";
-
+export async function fetchLastPostInfo(_id: string, _isPrivate: boolean): Promise<LastPostInfo> {
+  return { status: "error", ageText: null, shortcode: null };
+}
 /**
  * Serial, throttled, cached fetcher — the block-safety core. One request at a
  * time with a randomized gap, cached by user id, gated to idle time. Each
  * iteration is isolated (GS26): a poison item never kills the queue.
  */
 type Cache = Record<string, LastPostInfo>;
-
 const load = (): Cache => {
   try {
     const parsed: unknown = JSON.parse(localStorage.getItem(LAST_POST_CACHE_STORAGE_KEY) ?? "{}");
@@ -17,16 +18,13 @@ const load = (): Cache => {
     return {};
   }
 };
-
 const cache: Cache = load();
 const inFlight = new Set<string>();
 const queue: { id: string; isPrivate: boolean; cb: (info: LastPostInfo) => void }[] = [];
 let processing = false;
 let gate: () => boolean = () => true;
-
 export const setLastPostGate = (fn: () => boolean): void => { gate = fn; };
 export const getCachedLastPostInfos = (): Cache => ({ ...cache });
-
 async function run(): Promise<void> {
   if (processing) return;
   processing = true;
@@ -50,7 +48,6 @@ async function run(): Promise<void> {
   }
   processing = false;
 }
-
 /** Serve from cache, dedup in-flight, else enqueue. Emits `loading` first. */
 export function enqueueLastPost(id: string, isPrivate: boolean, cb: (info: LastPostInfo) => void): void {
   if (cache[id]?.status === "loaded") { cb(cache[id]); return; }

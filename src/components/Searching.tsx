@@ -1,8 +1,7 @@
-import React, { useEffect, useRef } from "react";
+import React from "react";
 import { assertUnreachable, getCurrentPageUnfollowers, getMaxPage, getUsersForDisplay, isWithoutProfilePicture } from "../utils/utils";
 import { State } from "../model/state";
 import { UserNode } from "../model/user";
-import { FeatureSettings, LastPostInfo } from "../model/last-post";
 import { WHITELISTED_RESULTS_STORAGE_KEY } from "../constants/constants";
 import { Language, t } from "../utils/i18n";
 
@@ -17,10 +16,6 @@ export interface SearchingProps {
   UserCheckIcon: React.FC;
   UserUncheckIcon: React.FC;
   lang: Language;
-  featureSettings: FeatureSettings;
-  lastPostInfos: Record<string, LastPostInfo>;
-  lastPostFetchAllowed: boolean;
-  requestLastPost: (user: UserNode) => void;
 }
 
 export const Searching = ({
@@ -33,91 +28,10 @@ export const Searching = ({
   UserCheckIcon,
   UserUncheckIcon,
   lang,
-  featureSettings,
-  lastPostInfos,
-  lastPostFetchAllowed,
-  requestLastPost,
 }: SearchingProps) => {
-  const observerRef = useRef<IntersectionObserver | null>(null);
-  const elementUserMap = useRef(new Map<Element, UserNode>());
-
-  // Tear down the observer when the component unmounts.
-  useEffect(
-    () => () => {
-      observerRef.current?.disconnect();
-      observerRef.current = null;
-      elementUserMap.current.clear();
-    },
-    [],
-  );
-
   if (state.status !== "scanning") {
     return null;
   }
-
-  const autoActive =
-    featureSettings.lastPostBadgeEnabled &&
-    featureSettings.lastPostMode === "auto" &&
-    lastPostFetchAllowed;
-
-  // ref-callback attached to each result card. In auto mode it registers the
-  // card with a shared IntersectionObserver so its last post is fetched only
-  // once it actually scrolls into view.
-  const cardRef = (el: HTMLElement | null, user: UserNode) => {
-    if (!autoActive || el === null) {
-      return;
-    }
-    if (observerRef.current === null) {
-      observerRef.current = new IntersectionObserver(
-        entries => {
-          entries.forEach(entry => {
-            if (!entry.isIntersecting) {
-              return;
-            }
-            const observedUser = elementUserMap.current.get(entry.target);
-            if (observedUser !== undefined) {
-              requestLastPost(observedUser);
-            }
-            observerRef.current?.unobserve(entry.target);
-            elementUserMap.current.delete(entry.target);
-          });
-        },
-        { rootMargin: "100px" },
-      );
-    }
-    elementUserMap.current.set(el, user);
-    observerRef.current.observe(el);
-  };
-
-  const renderLastPostBadge = (user: UserNode): React.JSX.Element | null => {
-    if (!featureSettings.lastPostBadgeEnabled) {
-      return null;
-    }
-    const info: LastPostInfo | undefined = lastPostInfos[user.id];
-    // Not requested yet: manual mode offers a button, auto mode waits for the observer.
-    if (info === undefined) {
-      return featureSettings.lastPostMode === "manual" ? (
-        <button
-          type="button"
-          className="last-post-button"
-          disabled={!lastPostFetchAllowed}
-          title={lastPostFetchAllowed ? "Fetch last post age" : "Available when the scan is finished or paused"}
-          onClick={(e: React.MouseEvent<HTMLButtonElement>) => { e.preventDefault(); e.stopPropagation(); requestLastPost(user); }}
-        >
-          last post?
-        </button>
-      ) : <span className="last-post-badge muted">…</span>;
-    }
-    if (info.status === "loaded") {
-      return info.shortcode !== null ? (
-        <a className="last-post-badge" target="_blank" rel="noreferrer" href={`/p/${info.shortcode}`}
-          onClick={(e: React.MouseEvent<HTMLAnchorElement>) => e.stopPropagation()}>
-          last post {info.ageText}
-        </a>
-      ) : <span className="last-post-badge muted">{info.ageText}</span>;
-    }
-    return <span className="last-post-badge muted">{info.status === "loading" ? "loading…" : "fetch failed"}</span>;
-  };
 
   const usersForDisplay = getUsersForDisplay(
     state.results,
@@ -182,6 +96,24 @@ export const Searching = ({
             <label className="badge m-small">
               <input
                 type="checkbox"
+                name="showNonFollowers"
+                checked={state.filter.showNonFollowers}
+                onChange={handleScanFilter}
+              />
+              &nbsp;{t(lang, "nonFollowers")}
+            </label>
+            <label className="badge m-small">
+              <input
+                type="checkbox"
+                name="showFollowers"
+                checked={state.filter.showFollowers}
+                onChange={handleScanFilter}
+              />
+              &nbsp;{t(lang, "followers")}
+            </label>
+            <label className="badge m-small">
+              <input
+                type="checkbox"
                 name="showVerified"
                 checked={state.filter.showVerified}
                 onChange={handleScanFilter}
@@ -211,7 +143,6 @@ export const Searching = ({
           <div className="sidebar-buttons-grid">
             <button
               className="button-secondary"
-              disabled={Boolean(state.isScanningActive)}
               onClick={() => {
                 const verifiedUsers = usersForDisplay.filter(u => u.is_verified);
                 const currentIds = new Set(state.selectedResults.map(u => u.id));
@@ -223,7 +154,6 @@ export const Searching = ({
             </button>
             <button
               className="button-secondary"
-              disabled={Boolean(state.isScanningActive)}
               onClick={() => {
                 const privateUsers = usersForDisplay.filter(u => u.is_private);
                 const currentIds = new Set(state.selectedResults.map(u => u.id));
@@ -235,7 +165,6 @@ export const Searching = ({
             </button>
             <button
               className="button-secondary"
-              disabled={Boolean(state.isScanningActive)}
               onClick={() => {
                 const noPicUsers = usersForDisplay.filter(u => isWithoutProfilePicture(u));
                 const currentIds = new Set(state.selectedResults.map(u => u.id));
@@ -247,7 +176,6 @@ export const Searching = ({
             </button>
             <button
               className="button-secondary danger-text"
-              disabled={Boolean(state.isScanningActive)}
               onClick={() => setState({ ...state, selectedResults: [] })}
             >
               {t(lang, "clear")}
@@ -263,7 +191,7 @@ export const Searching = ({
           )}
           <div className="sidebar-stats metric-stack">
             <p><span>{t(lang, "displayed")}</span><strong>{usersForDisplay.length}</strong></p>
-            <p><span>{t(lang, "totalScanned")}</span><strong>{state.totalScanned ?? state.results.length}</strong></p>
+            <p><span>{t(lang, "totalScanned")}</span><strong>{state.results.length}</strong></p>
             <p className="whitelist-counter">
               <span>{t(lang, "whitelist")}</span><strong>★ {state.whitelistedResults.length}</strong>
             </p>
@@ -416,9 +344,9 @@ export const Searching = ({
         {getCurrentPageUnfollowers(usersForDisplay, state.page).map(user => {
           const firstLetter = user.username.substring(0, 1).toUpperCase();
           return (
-            <React.Fragment key={user.id}>
+            <>
               {firstLetter !== currentLetter && onNewLetter(firstLetter)}
-              <label className="result-item" ref={(el: HTMLElement | null) => cardRef(el, user)}>
+              <label className="result-item">
                 <div className="flex grow align-center">
                   <div
                     className="avatar-container"
@@ -471,7 +399,6 @@ export const Searching = ({
                       {user.username}
                     </a>
                     <span className="fs-medium">{user.full_name}</span>
-                    {renderLastPostBadge(user)}
                   </div>
                   {user.is_verified && <div className="verified-badge">✔</div>}
                   {user.is_private && (
@@ -490,7 +417,7 @@ export const Searching = ({
                   />
                 </div>
               </label>
-            </React.Fragment>
+            </>
           );
         })}
       </article>
