@@ -96,24 +96,6 @@ export const Searching = ({
             <label className="badge m-small">
               <input
                 type="checkbox"
-                name="showNonFollowers"
-                checked={state.filter.showNonFollowers}
-                onChange={handleScanFilter}
-              />
-              &nbsp;{t(lang, "nonFollowers")}
-            </label>
-            <label className="badge m-small">
-              <input
-                type="checkbox"
-                name="showFollowers"
-                checked={state.filter.showFollowers}
-                onChange={handleScanFilter}
-              />
-              &nbsp;{t(lang, "followers")}
-            </label>
-            <label className="badge m-small">
-              <input
-                type="checkbox"
                 name="showVerified"
                 checked={state.filter.showVerified}
                 onChange={handleScanFilter}
@@ -143,6 +125,7 @@ export const Searching = ({
           <div className="sidebar-buttons-grid">
             <button
               className="button-secondary"
+              disabled={Boolean(state.isScanningActive)}
               onClick={() => {
                 const verifiedUsers = usersForDisplay.filter(u => u.is_verified);
                 const currentIds = new Set(state.selectedResults.map(u => u.id));
@@ -154,6 +137,7 @@ export const Searching = ({
             </button>
             <button
               className="button-secondary"
+              disabled={Boolean(state.isScanningActive)}
               onClick={() => {
                 const privateUsers = usersForDisplay.filter(u => u.is_private);
                 const currentIds = new Set(state.selectedResults.map(u => u.id));
@@ -165,6 +149,7 @@ export const Searching = ({
             </button>
             <button
               className="button-secondary"
+              disabled={Boolean(state.isScanningActive)}
               onClick={() => {
                 const noPicUsers = usersForDisplay.filter(u => isWithoutProfilePicture(u));
                 const currentIds = new Set(state.selectedResults.map(u => u.id));
@@ -176,6 +161,7 @@ export const Searching = ({
             </button>
             <button
               className="button-secondary danger-text"
+              disabled={Boolean(state.isScanningActive)}
               onClick={() => setState({ ...state, selectedResults: [] })}
             >
               {t(lang, "clear")}
@@ -191,13 +177,13 @@ export const Searching = ({
           )}
           <div className="sidebar-stats metric-stack">
             <p><span>{t(lang, "displayed")}</span><strong>{usersForDisplay.length}</strong></p>
-            <p><span>{t(lang, "totalScanned")}</span><strong>{state.results.length}</strong></p>
+            <p><span>{t(lang, "totalScanned")}</span><strong>{state.totalScanned ?? state.results.length}</strong></p>
             <p className="whitelist-counter">
               <span>{t(lang, "whitelist")}</span><strong>★ {state.whitelistedResults.length}</strong>
             </p>
           </div>
 
-          {state.percentage === 100 && (
+          {!state.isScanningActive && state.results.length > 0 && (
             <div className="sidebar-summary">
               <h4>{t(lang, "scanSummary")}</h4>
               <div className="summary-grid">
@@ -258,8 +244,14 @@ export const Searching = ({
         </div>
         <button
           className="unfollow"
-          disabled={state.scanIncomplete}
-          title={state.scanIncomplete ? t(lang, "unfollowDisabledPartialScan") : undefined}
+          disabled={state.scanIncomplete || Boolean(state.isScanningActive) || state.selectedResults.length === 0}
+          title={
+            state.isScanningActive
+              ? t(lang, "scanInProgressWait")
+              : state.scanIncomplete
+              ? t(lang, "unfollowDisabledPartialScan")
+              : undefined
+          }
           onClick={() => {
             if (state.scanIncomplete) {
               alert(t(lang, "unfollowDisabledPartialScan"));
@@ -338,7 +330,7 @@ export const Searching = ({
         {getCurrentPageUnfollowers(usersForDisplay, state.page).map(user => {
           const firstLetter = user.username.substring(0, 1).toUpperCase();
           return (
-            <>
+            <React.Fragment key={user.id}>
               {firstLetter !== currentLetter && onNewLetter(firstLetter)}
               <label className="result-item">
                 <div className="flex grow align-center">
@@ -405,12 +397,13 @@ export const Searching = ({
                   <input
                     className="account-checkbox"
                     type="checkbox"
-                    checked={state.selectedResults.indexOf(user) !== -1}
+                    disabled={Boolean(state.isScanningActive)}
+                    checked={state.selectedResults.some(result => result.id === user.id)}
                     onChange={(e: React.ChangeEvent<HTMLInputElement>) => toggleUser(e.currentTarget.checked, user)}
                   />
                 </div>
               </label>
-            </>
+            </React.Fragment>
           );
         })}
       </article>

@@ -58,10 +58,14 @@ export function getMaxPage(nonFollowersList: readonly UserNode[]): number {
 
 export function getCurrentPageUnfollowers(nonFollowersList: readonly UserNode[], currentPage: number): readonly UserNode[] {
   const sortedList = [...nonFollowersList].sort((a, b) => (a.username > b.username ? 1 : -1));
-  return sortedList.splice(UNFOLLOWERS_PER_PAGE * (currentPage - 1), UNFOLLOWERS_PER_PAGE);
+  const startIndex = UNFOLLOWERS_PER_PAGE * (currentPage - 1);
+  return sortedList.slice(startIndex, startIndex + UNFOLLOWERS_PER_PAGE);
 }
 
 export function isWithoutProfilePicture(user: UserNode): boolean {
+  if (!user.profile_pic_url) {
+    return true;
+  }
   return WITHOUT_PROFILE_PICTURE_URL_IDS.some(id => user.profile_pic_url.includes(id));
 }
 
@@ -95,10 +99,9 @@ export function getUsersForDisplay(
     if (!filter.showVerified && result.is_verified) {
       continue;
     }
-    if (!filter.showFollowers && result.follows_viewer) {
-      continue;
-    }
-    if (!filter.showNonFollowers && !result.follows_viewer) {
+    // Scans only keep accounts that don't follow back; this also hides
+    // mutuals stored by older cached scans.
+    if (result.follows_viewer) {
       continue;
     }
     if (!filter.showWithOutProfilePicture && isWithoutProfilePicture(result)) {
@@ -195,9 +198,11 @@ export interface FriendshipsPage {
   readonly has_more?: boolean;
 }
 
-export function friendshipsUrlGenerator(kind: FriendshipsListKind, maxId?: string, count: number = DEFAULT_USERS_PER_SEARCH_CYCLE): string {
-  const viewerId = getCookie('ds_user_id');
-  const base = `https://www.instagram.com/api/v1/friendships/${viewerId}/${kind}/?count=${count}`;
+// `userId` defaults to the logged-in viewer; pass another account's id to read
+// that account's following/followers list instead.
+export function friendshipsUrlGenerator(kind: FriendshipsListKind, maxId?: string, count: number = DEFAULT_USERS_PER_SEARCH_CYCLE, userId?: string): string {
+  const targetId = userId ?? getCookie('ds_user_id');
+  const base = `https://www.instagram.com/api/v1/friendships/${targetId}/${kind}/?count=${count}`;
   return maxId === undefined ? base : `${base}&max_id=${encodeURIComponent(maxId)}`;
 }
 
@@ -211,7 +216,7 @@ export class InstagramApiError extends Error {
   }
 }
 
-export async function fetchFriendshipsPage(kind: FriendshipsListKind, maxId?: string, count?: number): Promise<FriendshipsPage> {
+export async function fetchFriendshipsPage(kind: FriendshipsListKind, maxId?: string, count?: number, userId?: string): Promise<FriendshipsPage> {
   const csrftoken = getCookie('csrftoken') || '';
   const headers: Record<string, string> = {
     'X-IG-App-ID': INSTAGRAM_WEB_APP_ID,
@@ -223,14 +228,18 @@ export async function fetchFriendshipsPage(kind: FriendshipsListKind, maxId?: st
     headers['X-CSRFToken'] = csrftoken;
   }
 
-  const response = await fetch(friendshipsUrlGenerator(kind, maxId, count), {
+  const response = await fetch(friendshipsUrlGenerator(kind, maxId, count, userId), {
     credentials: 'same-origin',
     headers,
   });
   if (!response.ok) {
     throw new InstagramApiError(response.status, `Instagram returned HTTP ${response.status} while fetching ${kind}`);
   }
-  return response.json() as Promise<FriendshipsPage>;
+  const data = (await response.json()) as any;
+  if (data?.status === 'fail' || (!data?.users && data?.message)) {
+    throw new InstagramApiError(response.status, data?.message || `Instagram returned failure status while fetching ${kind}`);
+  }
+  return data as FriendshipsPage;
 }
 
 export function rawFriendshipUserToUserNode(raw: RawFriendshipUser, followsViewer: boolean): UserNode {
@@ -249,3 +258,73 @@ export function rawFriendshipUserToUserNode(raw: RawFriendshipUser, followsViewe
     follows_viewer: followsViewer,
   };
 }
+
+export interface FollowerIndex {
+  readonly ids: ReadonlySet<string>;
+  readonly usernames: ReadonlySet<string>;
+}
+
+export function createFollowerIndex(): {
+  readonly ids: Set<string>;
+  readonly usernames: Set<string>;
+} {
+  return {
+    ids: new Set<string>(),
+    usernames: new Set<string>(),
+  };
+}
+
+export function extractUserIdentities(user: RawFriendshipUser): {
+  readonly ids: readonly string[];
+  readonly username: string;
+} {
+  const ids: string[] = [];
+  if (user.pk !== undefined && user.pk !== null) {
+    const s = String(user.pk).trim();
+    if (s) {
+      ids.push(s);
+    }
+  }
+  if (user.pk_id) {
+    const s = String(user.pk_id).trim();
+    if (s && !ids.includes(s)) {
+      ids.push(s);
+    }
+  }
+  if ((user as any).id) {
+    const s = String((user as any).id).trim();
+    if (s && !ids.includes(s)) {
+      ids.push(s);
+    }
+  }
+  const username = (user.username ?? "").trim().toLowerCase();
+  return { ids, username };
+}
+
+export function addFollowerToIndex(
+  index: { readonly ids: Set<string>; readonly usernames: Set<string> },
+  user: RawFriendshipUser,
+): void {
+  const { ids, username } = extractUserIdentities(user);
+  for (const id of ids) {
+    index.ids.add(id);
+  }
+  if (username) {
+    index.usernames.add(username);
+  }
+}
+
+export function isUserInFollowerIndex(
+  index: { readonly ids: ReadonlySet<string>; readonly usernames: ReadonlySet<string> },
+  user: RawFriendshipUser,
+): boolean {
+  const { ids, username } = extractUserIdentities(user);
+  if (ids.some(id => index.ids.has(id))) {
+    return true;
+  }
+  if (username && index.usernames.has(username)) {
+    return true;
+  }
+  return false;
+}
+

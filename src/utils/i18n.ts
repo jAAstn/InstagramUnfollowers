@@ -10,6 +10,7 @@ export const translations = {
     launchDescription: "Scan your Instagram follows, review risk signals, protect whitelisted accounts, and act only on the users you select.",
     runScan: "Run Scan",
     runsInBrowserOnly: "Runs in this browser session only",
+    loadCachedScan: "Load previous scan (%s accounts)",
     ready: "Ready",
     protected: "Protected",
     whitelist: "Whitelist",
@@ -17,7 +18,7 @@ export const translations = {
     selectFirst: "Select first",
 
     // Toolbar
-    scanNoticeBanner: "⚠️ Accounts will not appear until the scan finishes or nears completion.",
+    scanNoticeBanner: "⚡ Fetching accounts in real time...",
     copyList: "Copy List",
     exportJson: "Export JSON",
     exportCsv: "Export CSV",
@@ -27,7 +28,7 @@ export const translations = {
     settings: "Settings",
     goBackConfirm: "Go back to Instagram?",
     copiedToClipboard: "List copied to clipboard!",
-    unfollowDisabledPartialScan: "Unfollow disabled: follower scan did not finish completely.",
+    unfollowDisabledPartialScan: "Unfollow disabled: the scan did not finish completely.",
     switchToSpanish: "Cambiar a Español",
     switchToEnglish: "Switch to English",
 
@@ -51,7 +52,7 @@ export const translations = {
     next: "Next",
     pause: "Pause",
     resume: "Resume",
-    partialScanWarning: "⚠️ Incomplete scan: Followers list was interrupted. Accounts that follow you may appear here. Mass unfollow is disabled to protect your account.",
+    partialScanWarning: "⚠️ Incomplete scan: it was interrupted before every account was checked, so some non-followers may be missing. Mass unfollow is disabled to protect your account.",
     noPic: "No Pic",
     clear: "Clear",
     displayed: "Displayed",
@@ -59,6 +60,7 @@ export const translations = {
     scanSummary: "Scan Summary",
     unfollowCount: "Unfollow (%s)",
     unfollowConfirm: "Are you sure you want to unfollow the selected accounts?",
+    scanInProgressWait: "Scan in progress: please wait until scan finishes to unfollow.",
     selectAtLeastOneUser: "Must select at least a single user to unfollow",
 
     // Settings
@@ -91,6 +93,12 @@ export const translations = {
     mergeWhitelist: "Merge (add to existing)",
     replaceWhitelist: "Replace (overwrite)",
     whitelistTip: "Export your whitelist to save it as a backup. You can import it later to restore your saved users.",
+    pasteWhitelist: "Paste Usernames",
+    pasteWhitelistPlaceholder: "Paste usernames here (separated by commas, spaces, or newlines)...",
+    addPastedToWhitelist: "Add to Whitelist",
+    pastedUsersAdded: "Added %s new users to whitelist!",
+    noValidUsernamesFound: "No valid usernames found.",
+    pastedUsersAlreadyExist: "All pasted users are already in the whitelist.",
 
     // Unfollowing Queue
     unfollowQueue: "Unfollow Queue",
@@ -103,9 +111,14 @@ export const translations = {
     // Toasts & Notifications
     scanCompleted: "Scanning completed!",
     scanFailedFollowing: "Scan failed: could not load your following list from Instagram.",
-    partialScanInterrupted: "Partial scan: loaded %s accounts, but scan was interrupted.",
-    rateLimitPause: "Instagram rate limit reached (HTTP 429). Pausing for %s seconds before retrying...",
+    scanFailedFollowers: "Scan failed: could not load your followers list from Instagram.",
+    indexingFollowersProgress: "Indexing followers (%s loaded)...",
+    scanningFollowingProgress: "Checking followed accounts (%s checked)...",
+    partialScanInterrupted: "Partial scan: checked %s accounts, but scan was interrupted.",
+    rateLimitPause: "Instagram cooldown active. Pausing for %s seconds before retrying...",
     sleepingSafety: "Sleeping %s seconds to prevent getting temp blocked",
+    loadedFromCache: "Loaded %s accounts from cache!",
+    actionBlockedWarning: "⚠️ Instagram Action Block detected (feedback_required). Unfollow queue stopped to protect your account.",
   },
   es: {
     // Launch Screen
@@ -114,6 +127,7 @@ export const translations = {
     launchDescription: "Escanea tus seguidos de Instagram, analiza señales de riesgo, protege cuentas en lista blanca y actúa solo sobre los usuarios seleccionados.",
     runScan: "Iniciar Escaneo",
     runsInBrowserOnly: "Se ejecuta solo en esta sesión del navegador",
+    loadCachedScan: "Cargar escaneo anterior (%s cuentas)",
     ready: "Listo",
     protected: "Protegido",
     whitelist: "Lista blanca",
@@ -121,7 +135,7 @@ export const translations = {
     selectFirst: "Selecciona primero",
 
     // Toolbar
-    scanNoticeBanner: "⚠️ Las cuentas aparecerán cuando el escaneo termine o esté por completarse.",
+    scanNoticeBanner: "⚡ Obteniendo cuentas en tiempo real...",
     copyList: "Copiar Lista",
     exportJson: "Exportar JSON",
     exportCsv: "Exportar CSV",
@@ -131,7 +145,7 @@ export const translations = {
     settings: "Ajustes",
     goBackConfirm: "¿Deseas volver a Instagram?",
     copiedToClipboard: "¡Lista copiada al portapapeles!",
-    unfollowDisabledPartialScan: "Unfollow desactivado: el escaneo de seguidores no finalizó por completo.",
+    unfollowDisabledPartialScan: "Unfollow desactivado: el escaneo no finalizó por completo.",
     switchToSpanish: "Cambiar a Español",
     switchToEnglish: "Switch to English",
 
@@ -155,7 +169,7 @@ export const translations = {
     next: "Siguiente",
     pause: "Pausar",
     resume: "Reanudar",
-    partialScanWarning: "⚠️ Escaneo incompleto: la lista de seguidores se interrumpió. Cuentas que te siguen podrían aparecer aquí. El unfollow masivo ha sido desactivado por seguridad.",
+    partialScanWarning: "⚠️ Escaneo incompleto: se interrumpió antes de revisar todas las cuentas, por lo que pueden faltar cuentas que no te siguen. El unfollow masivo ha sido desactivado por seguridad.",
     noPic: "Sin foto",
     clear: "Limpiar",
     displayed: "Mostrados",
@@ -163,6 +177,7 @@ export const translations = {
     scanSummary: "Resumen",
     unfollowCount: "Dejar de Seguir (%s)",
     unfollowConfirm: "¿Estás seguro de dejar de seguir a las cuentas seleccionadas?",
+    scanInProgressWait: "Escaneo en progreso: espera a que termine para dejar de seguir.",
     selectAtLeastOneUser: "Debes seleccionar al menos un usuario",
 
     // Settings
@@ -195,6 +210,12 @@ export const translations = {
     mergeWhitelist: "Combinar (añadir)",
     replaceWhitelist: "Reemplazar (sobrescribir)",
     whitelistTip: "Exporta tu lista blanca para guardarla como copia de seguridad. Puedes importarla después para restaurar tus usuarios guardados.",
+    pasteWhitelist: "Pegar Usuarios",
+    pasteWhitelistPlaceholder: "Pega nombres de usuario aquí (separados por comas, espacios o saltos de línea)...",
+    addPastedToWhitelist: "Añadir a Lista Blanca",
+    pastedUsersAdded: "¡Se añadieron %s nuevos usuarios a la lista blanca!",
+    noValidUsernamesFound: "No se encontraron nombres de usuario válidos.",
+    pastedUsersAlreadyExist: "Todos los usuarios pegados ya están en la lista blanca.",
 
     // Unfollowing Queue
     unfollowQueue: "Cola de Unfollow",
@@ -207,9 +228,14 @@ export const translations = {
     // Toasts & Notifications
     scanCompleted: "¡Escaneo completado!",
     scanFailedFollowing: "Error en el escaneo: no se pudo cargar la lista de seguidos de Instagram.",
-    partialScanInterrupted: "Escaneo parcial: se cargaron %s cuentas, pero el escaneo fue interrumpido.",
-    rateLimitPause: "Límite de tasa de Instagram alcanzado (HTTP 429). Pausando %s segundos antes de reintentar...",
+    scanFailedFollowers: "Error en el escaneo: no se pudo cargar la lista de seguidores de Instagram.",
+    indexingFollowersProgress: "Indexando seguidores (%s cargados)...",
+    scanningFollowingProgress: "Comprobando cuentas seguidas (%s revisadas)...",
+    partialScanInterrupted: "Escaneo parcial: se revisaron %s cuentas, pero el escaneo fue interrumpido.",
+    rateLimitPause: "Enfriamiento de Instagram activo. Pausando %s segundos antes de reintentar...",
     sleepingSafety: "Esperando %s segundos para prevenir bloqueos temporales",
+    loadedFromCache: "¡Se cargaron %s cuentas del historial!",
+    actionBlockedWarning: "⚠️ Bloqueo de acción de Instagram detectado (feedback_required). La cola se detuvo para proteger tu cuenta.",
   },
 } as const;
 
