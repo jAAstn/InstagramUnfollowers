@@ -50,6 +50,11 @@ export const Unfollowing = (
         </menu>
       </aside>
       <article className="unfollow-log-container">
+        {state.aborted && (
+          <div className="fs-large p-medium clr-red" role="alert">
+            {t(lang, "actionBlockedWarning")}
+          </div>
+        )}
         {state.unfollowLog.length === state.selectedResults.length && (
           <>
             <hr />
@@ -65,7 +70,7 @@ export const Unfollowing = (
                 <a
                   className="clr-inherit"
                   target="_blank"
-                  href={`../${entry.user.username}`}
+                  href={`/${entry.user.username}`}
                   rel="noreferrer"
                 >
                   &nbsp;{entry.user.username}

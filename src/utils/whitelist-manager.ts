@@ -1,6 +1,7 @@
 import { UserNode } from "../model/user";
 import { Timings } from "../model/timings";
-import { WHITELISTED_RESULTS_STORAGE_KEY, TIMINGS_STORAGE_KEY } from "../constants/constants";
+import { WHITELISTED_RESULTS_STORAGE_KEY, TIMINGS_STORAGE_KEY, LAST_SCAN_RESULTS_STORAGE_KEY, LAST_SCAN_TIMESTAMP_STORAGE_KEY, BLOCKED_UNTIL_STORAGE_KEY } from "../constants/constants";
+import { getCookie } from "./utils";
 
 /**
  * Export whitelist to a JSON file
@@ -87,15 +88,27 @@ export const clearWhitelist = (): void => {
  * Load whitelist from localStorage
  */
 export const loadWhitelist = (): readonly UserNode[] => {
-  const whitelistedResultsFromStorage = localStorage.getItem(WHITELISTED_RESULTS_STORAGE_KEY);
-  return whitelistedResultsFromStorage === null ? [] : JSON.parse(whitelistedResultsFromStorage);
+  try {
+    const whitelistedResultsFromStorage = localStorage.getItem(WHITELISTED_RESULTS_STORAGE_KEY);
+    if (!whitelistedResultsFromStorage) {
+      return [];
+    }
+    const parsed = JSON.parse(whitelistedResultsFromStorage);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 };
 
 /**
  * Save whitelist to localStorage
  */
 export const saveWhitelist = (whitelistedUsers: readonly UserNode[]): void => {
-  localStorage.setItem(WHITELISTED_RESULTS_STORAGE_KEY, JSON.stringify(whitelistedUsers));
+  try {
+    localStorage.setItem(WHITELISTED_RESULTS_STORAGE_KEY, JSON.stringify(whitelistedUsers));
+  } catch (e) {
+    console.warn("Could not save whitelist to storage:", e);
+  }
 };
 
 /**
@@ -140,5 +153,74 @@ export const loadTimings = (): Timings | null => {
  * Save timings to localStorage
  */
 export const saveTimings = (timings: Timings): void => {
-  localStorage.setItem(TIMINGS_STORAGE_KEY, JSON.stringify(timings));
+  try {
+    localStorage.setItem(TIMINGS_STORAGE_KEY, JSON.stringify(timings));
+  } catch (e) {
+    console.warn("Could not save timings to storage:", e);
+  }
+};
+
+/**
+ * Cache completed scan results locally for instant recall.
+ * Scoped to the logged-in account: one shared key would show the previous
+ * account's results after switching accounts.
+ */
+const cacheKeySuffix = (accountId?: string | null): string => `-${accountId ?? getCookie("ds_user_id") ?? ""}`;
+
+/**
+ * `accountId` is the viewer captured when the scan started. Passing it keeps a
+ * scan that outlives an account switch under the account it came from, instead
+ * of overwriting the new account's cache.
+ */
+export const saveCachedScanResults = (results: readonly UserNode[], accountId?: string | null): void => {
+  try {
+    const suffix = cacheKeySuffix(accountId);
+    localStorage.setItem(LAST_SCAN_RESULTS_STORAGE_KEY + suffix, JSON.stringify(results));
+    localStorage.setItem(LAST_SCAN_TIMESTAMP_STORAGE_KEY + suffix, String(Date.now()));
+  } catch (e) {
+    console.warn("Could not cache scan results:", e);
+  }
+};
+
+/**
+ * Load cached scan results from localStorage
+ */
+export const loadCachedScanResults = (): { results: readonly UserNode[]; timestamp: number } | null => {
+  try {
+    const suffix = cacheKeySuffix();
+    const raw = localStorage.getItem(LAST_SCAN_RESULTS_STORAGE_KEY + suffix);
+    const time = localStorage.getItem(LAST_SCAN_TIMESTAMP_STORAGE_KEY + suffix);
+    if (!raw || !time) {
+      return null;
+    }
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      return null;
+    }
+    return {
+      results: parsed as readonly UserNode[],
+      timestamp: Number(time),
+    };
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Timestamp (ms) until which scans and unfollows must not start.
+ */
+export const getBlockedUntil = (): number => {
+  try {
+    return Number(localStorage.getItem(BLOCKED_UNTIL_STORAGE_KEY) ?? 0);
+  } catch {
+    return 0;
+  }
+};
+
+export const setBlockedUntil = (until: number): void => {
+  try {
+    localStorage.setItem(BLOCKED_UNTIL_STORAGE_KEY, String(until));
+  } catch (e) {
+    console.warn("Could not persist the cooldown:", e);
+  }
 };

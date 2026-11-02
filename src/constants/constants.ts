@@ -8,17 +8,27 @@ export const UNFOLLOWERS_PER_PAGE = 50;
 export const INSTAGRAM_WEB_APP_ID = "936619743392459";
 export const INSTAGRAM_ASBD_ID = "129477";
 
-// Page-count safety caps for the following/followers scan (see
-// utils/utils.ts fetchAllFriendships and main.tsx). Instagram serves the
-// followers list back in small, server-controlled chunks (observed ~15-25
-// users/page, ignoring the `count` we request) rather than the larger
-// chunks it gives for the following list, so followers needs a much higher
-// cap to be able to finish a full scan.
+// The persisted GraphQL query instagram.com's own Unfollow button runs
+// (fb_api_req_friendly_name "usePolarisUnfollowMutation"). Instagram can rotate
+// this id on a deploy; if unfollows start failing with a GraphQL error, capture
+// the button's /api/graphql request in DevTools and update it here.
+export const INSTAGRAM_UNFOLLOW_DOC_ID = "27789106940691111";
+export const INSTAGRAM_UNFOLLOW_FRIENDLY_NAME = "usePolarisUnfollowMutation";
+
+// Page-count safety cap for loading the viewer's own following and followers lists
+// (see utils/utils.ts and main.tsx).
 export const FOLLOWING_PAGE_SAFETY_LIMIT = 250;
-export const FOLLOWERS_PAGE_SAFETY_LIMIT = 1500;
+export const FOLLOWERS_PAGE_SAFETY_LIMIT = 250;
+// A long safety sleep is taken once every this many scan requests.
+export const CHECKS_BEFORE_LONG_SLEEP = 15;
 export const RATE_LIMIT_COOLDOWN_SECONDS = 30;
 export const WHITELISTED_RESULTS_STORAGE_KEY = "iu_whitelisted-results";
 export const TIMINGS_STORAGE_KEY = "iu_timings";
+export const LAST_SCAN_RESULTS_STORAGE_KEY = "iu_last-scan-results";
+export const LAST_SCAN_TIMESTAMP_STORAGE_KEY = "iu_last-scan-time";
+// Persisted across reloads: starting a scan/unfollow before this is refused.
+export const BLOCKED_UNTIL_STORAGE_KEY = "iu_blocked_until";
+export const BLOCKED_COOLDOWN_MS = 10 * 60 * 1000;
 
 //TIMINGS CONSTANTS
 export const DEFAULT_TIME_BETWEEN_SEARCH_CYCLES = 1000;
