@@ -17,14 +17,28 @@ export async function copyListToClipboard(nonFollowersList: readonly UserNode[],
   alert(alertMessage);
 }
 
+function downloadBlob(blob: Blob, filename: string): void {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  // Revoking immediately can cancel the download in some browsers.
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+}
+
 export function exportToJSON(users: readonly UserNode[]) {
-  const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(users, null, 2));
-  const downloadAnchorNode = document.createElement('a');
-  downloadAnchorNode.setAttribute("href",     dataStr);
-  downloadAnchorNode.setAttribute("download", "instagram_unfollowers.json");
-  document.body.appendChild(downloadAnchorNode);
-  downloadAnchorNode.click();
-  downloadAnchorNode.remove();
+  downloadBlob(new Blob([JSON.stringify(users, null, 2)], { type: "application/json" }), "instagram_unfollowers.json");
+}
+
+// Spreadsheet apps execute cells starting with these characters, so they get a
+// leading apostrophe and every cell is quoted.
+function csvCell(value: unknown): string {
+  const text = value === null || value === undefined ? "" : String(value);
+  const safe = /^[=+\-@\t\r]/.test(text) ? `'${text}` : text;
+  return `"${safe.replace(/"/g, '""')}"`;
 }
 
 export function exportToCSV(users: readonly UserNode[]) {
@@ -32,23 +46,15 @@ export function exportToCSV(users: readonly UserNode[]) {
   const rows = users.map(user => [
     user.id,
     user.username,
-    `"${user.full_name.replace(/"/g, '""')}"`,
+    user.full_name,
     user.is_verified,
     user.is_private,
     user.profile_pic_url
-  ]);
-  
-  const csvContent = "data:text/csv;charset=utf-8," 
-    + headers.join(",") + "\n" 
-    + rows.map(e => e.join(",")).join("\n");
+  ].map(csvCell).join(","));
 
-  const encodedUri = encodeURI(csvContent);
-  const link = document.createElement("a");
-  link.setAttribute("href", encodedUri);
-  link.setAttribute("download", "instagram_unfollowers.csv");
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
+  // BOM so Excel reads the file as UTF-8 (Turkish characters), CRLF for Windows.
+  const csvContent = "\ufeff" + headers.join(",") + "\r\n" + rows.join("\r\n");
+  downloadBlob(new Blob([csvContent], { type: "text/csv;charset=utf-8" }), "instagram_unfollowers.csv");
 }
 
 export function getMaxPage(nonFollowersList: readonly UserNode[]): number {
@@ -77,8 +83,9 @@ export function getUsersForDisplay(
   filter: ScanningFilter,
 ): readonly UserNode[] {
   const users: UserNode[] = [];
+  const whitelistedIds = new Set(whitelistedResults.map(user => user.id));
   for (const result of results) {
-    const isWhitelisted = whitelistedResults.find(user => user.id === result.id) !== undefined;
+    const isWhitelisted = whitelistedIds.has(result.id);
     switch (currentTab) {
       case "non_whitelisted":
         if (isWhitelisted) {
@@ -109,7 +116,7 @@ export function getUsersForDisplay(
     }
     const userMatchesSearchTerm =
       result.username.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      result.full_name.toLowerCase().includes(searchTerm.toLowerCase());
+      (result.full_name ?? "").toLowerCase().includes(searchTerm.toLowerCase());
     if (searchTerm !== "" && !userMatchesSearchTerm) {
       continue;
     }
@@ -163,8 +170,230 @@ export function getCookie(name: string): string | null {
   return parts.pop()!.split(';').shift()!;
 }
 
-export function unfollowUserUrlGenerator(idToUnfollow: string): string {
-  return `https://www.instagram.com/web/friendships/${idToUnfollow}/unfollow/`;
+// --- Headers instagram.com's own web client sends on /api/v1 calls --------
+// X-IG-WWW-Claim: Instagram stores it in sessionStorage ("www-claim-v2") and
+// refreshes it via the X-IG-Set-WWW-Claim response header. "0" is accepted
+// when none is known yet.
+const WWW_CLAIM_STORAGE_KEY = 'www-claim-v2';
+let wwwClaim: string | null = null;
+
+function getWwwClaim(): string {
+  if (wwwClaim === null) {
+    try {
+      wwwClaim = sessionStorage.getItem(WWW_CLAIM_STORAGE_KEY) || '0';
+    } catch {
+      wwwClaim = '0';
+    }
+  }
+  return wwwClaim;
+}
+
+function rememberWwwClaim(response: Response): void {
+  const claim = response.headers.get('x-ig-set-www-claim');
+  if (claim) {
+    wwwClaim = claim;
+    try {
+      sessionStorage.setItem(WWW_CLAIM_STORAGE_KEY, claim);
+    } catch {
+      // Storage unavailable; the in-memory copy is enough.
+    }
+  }
+}
+
+// X-Web-Session-ID: three 6-char base36 groups, generated once per page load.
+const webSessionId = [0, 0, 0].map(() => Math.random().toString(36).slice(2, 8).padEnd(6, '0')).join(':');
+
+export function instagramApiHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  const csrftoken = getCookie('csrftoken') || '';
+  const headers: Record<string, string> = {
+    'X-IG-App-ID': INSTAGRAM_WEB_APP_ID,
+    'X-ASBD-ID': INSTAGRAM_ASBD_ID,
+    'X-IG-WWW-Claim': getWwwClaim(),
+    'X-Web-Session-ID': webSessionId,
+    'X-Requested-With': 'XMLHttpRequest',
+    'Accept': '*/*',
+    ...extra,
+  };
+  if (csrftoken) {
+    headers['X-CSRFToken'] = csrftoken;
+  }
+  return headers;
+}
+
+export type UnfollowOutcome = 'unfollowed' | 'failed' | 'blocked';
+
+export interface UnfollowResult {
+  readonly outcome: UnfollowOutcome;
+  readonly detail: string;
+}
+
+interface WebSessionTokens {
+  readonly fbDtsg: string;
+  readonly lsd: string;
+  readonly revision?: string;
+}
+
+let cachedWebSessionTokens: WebSessionTokens | null = null;
+
+function tokensFromHtml(html: string): WebSessionTokens | null {
+  const fbDtsg = /"DTSGInitialData",\[\],\{"token":"([^"]+)"/.exec(html)?.[1] ?? /"dtsg":\{"token":"([^"]+)"/.exec(html)?.[1];
+  const lsd = /"LSD",\[\],\{"token":"([^"]+)"/.exec(html)?.[1];
+  if (!fbDtsg || !lsd) {
+    return null;
+  }
+  return { fbDtsg, lsd, revision: /"client_revision":(\d+)/.exec(html)?.[1] };
+}
+
+// fb_dtsg and lsd are the per-session tokens instagram.com's GraphQL writes
+// carry. They come from the page's module registry when it is still loaded,
+// otherwise from the inline page data, otherwise from a fresh copy of the page.
+async function getWebSessionTokens(): Promise<WebSessionTokens | null> {
+  if (cachedWebSessionTokens !== null) {
+    return cachedWebSessionTokens;
+  }
+  try {
+    const req = (window as any).require;
+    if (typeof req === 'function') {
+      const fbDtsg = req('DTSGInitialData')?.token;
+      const lsd = req('LSD')?.token;
+      if (fbDtsg && lsd) {
+        cachedWebSessionTokens = { fbDtsg, lsd, revision: String(req('SiteData')?.client_revision ?? '') || undefined };
+        return cachedWebSessionTokens;
+      }
+    }
+  } catch {
+    // Module registry unavailable; fall back to the HTML.
+  }
+  cachedWebSessionTokens = tokensFromHtml(document.documentElement.innerHTML);
+  if (cachedWebSessionTokens === null) {
+    try {
+      const res = await fetch('https://www.instagram.com/', { credentials: 'same-origin' });
+      cachedWebSessionTokens = tokensFromHtml(await res.text());
+    } catch (e) {
+      console.warn('Could not load Instagram session tokens:', e);
+    }
+  }
+  return cachedWebSessionTokens;
+}
+
+// Instagram's checksum of fb_dtsg: "2" followed by the sum of its char codes.
+function jazoest(fbDtsg: string): string {
+  let sum = 0;
+  for (let i = 0; i < fbDtsg.length; i++) {
+    sum += fbDtsg.charCodeAt(i);
+  }
+  return `2${sum}`;
+}
+
+function findFriendshipStatus(node: any): any {
+  if (node === null || typeof node !== 'object') {
+    return undefined;
+  }
+  if (node.friendship_status && typeof node.friendship_status === 'object') {
+    return node.friendship_status;
+  }
+  for (const value of Object.values(node)) {
+    const found = findFriendshipStatus(value);
+    if (found !== undefined) {
+      return found;
+    }
+  }
+  return undefined;
+}
+
+// Searches the viewer's own following list for one account, the same way the
+// followers search in probe/issue.md works. Returns null if the lookup failed.
+export async function isStillFollowing(user: { readonly id: string; readonly username: string }): Promise<boolean | null> {
+  const viewerId = getCookie('ds_user_id');
+  if (viewerId === null) {
+    return null;
+  }
+  const url = `https://www.instagram.com/api/v1/friendships/${viewerId}/following/?count=12&query=${encodeURIComponent(user.username)}&search_surface=follow_list_page`;
+  try {
+    const page = await fetchFriendshipsPageFromUrl(url);
+    const target = user.username.toLowerCase();
+    return (page.users ?? []).some(u => {
+      const { ids, username } = extractUserIdentities(u);
+      return ids.includes(user.id) || username === target;
+    });
+  } catch (e) {
+    console.warn(`Could not verify unfollow of ${user.username}:`, e);
+    return null;
+  }
+}
+
+// Unfollows the way instagram.com's own Unfollow button does (Oct 2026):
+// POST /api/v1/friendships/destroy/<id>/ with the same headers and form body
+// the web client sends. It only counts once Instagram confirms the follow is
+// gone: the response's friendship_status says so, or a follow-up search of
+// the viewer's following list no longer finds the account. A 2xx alone proves
+// nothing (Instagram answers unknown routes with a 200 HTML page).
+export async function unfollowUser(user: { readonly id: string; readonly username: string }, csrftoken: string): Promise<UnfollowResult> {
+  const tokens = await getWebSessionTokens();
+  if (tokens === null) {
+    return { outcome: 'failed', detail: 'could not find the fb_dtsg/lsd session tokens on the page' };
+  }
+  const body = new URLSearchParams({
+    container_module: 'profile',
+    nav_chain: 'PolarisProfilePostsTabRoot:profilePage:1:via_cold_start',
+    user_id: user.id,
+    jazoest: jazoest(tokens.fbDtsg),
+    fb_dtsg: tokens.fbDtsg,
+  });
+  const extra: Record<string, string> = {
+    'Content-Type': 'application/x-www-form-urlencoded',
+    'X-CSRFToken': csrftoken,
+  };
+  if (tokens.revision) {
+    extra['X-Instagram-AJAX'] = tokens.revision;
+  }
+
+  const res = await fetch(`https://www.instagram.com/api/v1/friendships/destroy/${user.id}/`, {
+    headers: instagramApiHeaders(extra),
+    method: 'POST',
+    credentials: 'same-origin',
+    body: body.toString(),
+  });
+  rememberWwwClaim(res);
+  const text = await res.text().catch(() => '');
+  let data: any = null;
+  try {
+    data = JSON.parse(text.replace(/^for \(;;\);/, ''));
+  } catch {
+    // Not JSON; reported below with enough context to see what came back.
+  }
+
+  const errorText = JSON.stringify(data?.errors ?? data?.error ?? '') + ` ${data?.message ?? ''} ${data?.errorSummary ?? ''}`;
+  const isActionBlocked =
+    res.status === 429 ||
+    data?.spam === true ||
+    /feedback_required|checkpoint|action_blocked|try again later|rate limit/i.test(errorText);
+  if (isActionBlocked) {
+    return { outcome: 'blocked', detail: `HTTP ${res.status}: ${errorText.trim()}` };
+  }
+  if (!res.ok || data === null || data.errors || data.error || data.status !== 'ok') {
+    const body = data === null
+      ? `not JSON (content-type ${res.headers.get('content-type')}, redirected ${res.redirected}, final URL ${res.url}): ${text.slice(0, 300)}`
+      : JSON.stringify(data).slice(0, 1000);
+    return { outcome: 'failed', detail: `HTTP ${res.status}, body ${body}` };
+  }
+
+  const fs = findFriendshipStatus(data);
+  if (fs && (fs.following === true || fs.outgoing_request === true)) {
+    return { outcome: 'failed', detail: `Instagram answered but friendship_status still shows following: ${JSON.stringify(fs)}` };
+  }
+  if (fs && fs.following === false) {
+    return { outcome: 'unfollowed', detail: 'confirmed' };
+  }
+
+  const stillFollowing = await isStillFollowing(user);
+  if (stillFollowing === true) {
+    return { outcome: 'failed', detail: `Instagram answered but the account is still in your following list. Response: ${JSON.stringify(data).slice(0, 500)}` };
+  }
+  if (stillFollowing === null) {
+    return { outcome: 'failed', detail: `Instagram answered but the unfollow could not be confirmed. Response: ${JSON.stringify(data).slice(0, 500)}` };
+  }
+  return { outcome: 'unfollowed', detail: 'confirmed' };
 }
 
 export type FriendshipsListKind = 'following' | 'followers';
@@ -202,42 +431,55 @@ export interface FriendshipsPage {
 // that account's following/followers list instead.
 export function friendshipsUrlGenerator(kind: FriendshipsListKind, maxId?: string, count: number = DEFAULT_USERS_PER_SEARCH_CYCLE, userId?: string): string {
   const targetId = userId ?? getCookie('ds_user_id');
-  const base = `https://www.instagram.com/api/v1/friendships/${targetId}/${kind}/?count=${count}`;
+  const base = `https://www.instagram.com/api/v1/friendships/${targetId}/${kind}/?count=${count}&search_surface=follow_list_page`;
   return maxId === undefined ? base : `${base}&max_id=${encodeURIComponent(maxId)}`;
 }
 
 export class InstagramApiError extends Error {
   readonly status: number;
-  constructor(status: number, message: string) {
+  // True when Instagram answered with its HTML page instead of JSON. On long
+  // lists this happens mid-scan as a soft throttle (often after a few thousand
+  // followers), so callers treat it as transient and retry after a pause.
+  readonly notJson: boolean;
+  constructor(status: number, message: string, notJson: boolean = false) {
     super(message);
     Object.setPrototypeOf(this, InstagramApiError.prototype);
     this.name = 'InstagramApiError';
     this.status = status;
+    this.notJson = notJson;
   }
 }
 
 export async function fetchFriendshipsPage(kind: FriendshipsListKind, maxId?: string, count?: number, userId?: string): Promise<FriendshipsPage> {
-  const csrftoken = getCookie('csrftoken') || '';
-  const headers: Record<string, string> = {
-    'X-IG-App-ID': INSTAGRAM_WEB_APP_ID,
-    'X-ASBD-ID': INSTAGRAM_ASBD_ID,
-    'X-Requested-With': 'XMLHttpRequest',
-    'Accept': '*/*',
-  };
-  if (csrftoken) {
-    headers['X-CSRFToken'] = csrftoken;
-  }
+  return fetchFriendshipsPageFromUrl(friendshipsUrlGenerator(kind, maxId, count, userId));
+}
 
-  const response = await fetch(friendshipsUrlGenerator(kind, maxId, count, userId), {
+async function fetchFriendshipsPageFromUrl(url: string, headers?: Record<string, string>): Promise<FriendshipsPage> {
+  const response = await fetch(url, {
     credentials: 'same-origin',
-    headers,
+    headers: headers ?? instagramApiHeaders(),
   });
+  rememberWwwClaim(response);
+  const contentType = response.headers.get('content-type') || '';
+  const text = await response.text().catch(() => '');
+  const describe = () =>
+    `Instagram returned HTTP ${response.status} (${contentType || 'no content-type'}, redirected ${response.redirected}, final URL ${response.url}) for ${url}: ${text.slice(0, 200)}`;
   if (!response.ok) {
-    throw new InstagramApiError(response.status, `Instagram returned HTTP ${response.status} while fetching ${kind}`);
+    throw new InstagramApiError(response.status, describe());
   }
-  const data = (await response.json()) as any;
+  // Instagram answers throttled or unauthorised API calls with its 200 HTML
+  // page, sometimes even labelled as JSON, so parse defensively.
+  let data: any;
+  try {
+    if (!/json/i.test(contentType)) {
+      throw new Error('not JSON');
+    }
+    data = JSON.parse(text);
+  } catch {
+    throw new InstagramApiError(response.status, describe(), true);
+  }
   if (data?.status === 'fail' || (!data?.users && data?.message)) {
-    throw new InstagramApiError(response.status, data?.message || `Instagram returned failure status while fetching ${kind}`);
+    throw new InstagramApiError(response.status, data?.message || `Instagram returned failure status for ${url}`);
   }
   return data as FriendshipsPage;
 }
